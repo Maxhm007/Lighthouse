@@ -9,6 +9,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID, uuid4
+from .verification import verify_envelope
 
 
 def _now():
@@ -98,3 +99,65 @@ class Store:
             messages = [dict(r) for r in db.execute('SELECT verification_state,COUNT(*) AS count FROM messages GROUP BY verification_state')]
             experiments = db.execute('SELECT COUNT(*) FROM experiments').fetchone()[0]
         return {'messages': messages, 'experiments': experiments}
+
+    def record_verified_envelope(self, envelope, sender_secrets, reviewer):
+        """Verify full payload before insertion, then persist the verified receipt.
+
+        This marks *signature verification*, not independent factual validation.
+        """
+        receipt = verify_envelope(envelope, sender_secrets)
+        if not isinstance(reviewer, str) or not reviewer.strip() or len(reviewer) > 160:
+            raise ValueError("Verifier identity required")
+        proposal = envelope["proposal"]
+        raw = json.dumps(envelope, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        record_id = str(uuid4())
+        digest = hashlib.sha256(raw.encode()).hexdigest()
+        with self.connect() as db:
+            db.execute("""
+                INSERT INTO messages
+                (id,sender,recipient,proposal_id,kind,envelope_json,sha256,
+                 verification_state,received_at,reviewed_at,reviewer,review_evidence)
+                VALUES (?,?,?,?,?,?,?,'verified',?,?,?,?)
+            """, (record_id, receipt["sender"], proposal["recipient"], receipt["proposal_id"],
+                  proposal["kind"], raw, digest, _now(), receipt["verified_at"], reviewer,
+                  "Cryptographic signature verified; scientific claims unreviewed"))
+        return {"id": record_id, "verification_state": "verified", "sha256": digest}
+
+    def snapshot(self):
+        with self.connect() as db:
+            messages = [dict(r) for r in db.execute("""
+                SELECT sender,recipient,kind,verification_state,received_at
+                FROM messages ORDER BY received_at DESC LIMIT 500
+            """)]
+            experiments = [dict(r) for r in db.execute("""
+                SELECT title,source,created_at FROM experiments ORDER BY created_at DESC LIMIT 500
+            """)]
+            counts = [dict(r) for r in db.execute("""
+                SELECT verification_state, COUNT(*) count FROM messages GROUP BY verification_state
+            """)]
+        return {"messages": messages, "experiments": experiments, "messages_by_state": counts}
+
+    def export_bundle(self):
+        """Portable, public-data-only export. Verification statuses NEVER transfer as trust."""
+        with self.connect() as db:
+            envelopes = [json.loads(r[0]) for r in db.execute(
+                "SELECT envelope_json FROM messages ORDER BY received_at LIMIT 5000")]
+        return {"format": "lighthouse-exchange-v1", "envelopes": envelopes}
+
+    def import_bundle(self, bundle):
+        """Idempotent, bounded offline import. Every imported message is unverified."""
+        if not isinstance(bundle, dict) or set(bundle) != {"format","envelopes"} or bundle["format"] != "lighthouse-exchange-v1":
+            raise ValueError("Invalid bundle format")
+        envelopes = bundle["envelopes"]
+        if not isinstance(envelopes, list) or len(envelopes) > 1000:
+            raise ValueError("Invalid bundle size")
+        if len(json.dumps(bundle, ensure_ascii=False).encode()) > 5_000_000:
+            raise ValueError("Oversized bundle")
+        imported, duplicates = 0, 0
+        for envelope in envelopes:
+            try:
+                self.record_envelope(envelope)
+                imported += 1
+            except sqlite3.IntegrityError:
+                duplicates += 1
+        return {"imported": imported, "duplicates": duplicates}
