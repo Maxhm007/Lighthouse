@@ -2,10 +2,8 @@
 import argparse
 import json
 import os
-import os
 from pathlib import Path
 from .store import Store
-from .observatory import render
 from .observatory import render
 
 
@@ -30,15 +28,6 @@ def main():
     import_cmd.add_argument('file', type=Path)
     observatory = commands.add_parser('observatory', help='Generate offline read-only HTML')
     observatory.add_argument('file', type=Path)
-    verified = commands.add_parser('verify-envelope')
-    verified.add_argument('file', type=Path)
-    verified.add_argument('--reviewer', default='manual-hmac-verifier')
-    export = commands.add_parser('export')
-    export.add_argument('file', type=Path)
-    importer = commands.add_parser('import')
-    importer.add_argument('file', type=Path)
-    observatory = commands.add_parser('observatory')
-    observatory.add_argument('file', type=Path)
     args = parser.parse_args()
     store = Store(args.db)
     store.init()
@@ -53,7 +42,7 @@ def main():
         args.file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
         value = {'exported': len(data['envelopes']), 'output': str(args.file)}
     else:
-        limit = 5000000 if args.command == 'import' else 40000 if args.command == 'record-envelope' else 100000
+        limit = 5000000 if args.command == 'import' else 100000 if args.command == 'record-experiment' else 40000
         if args.file.stat().st_size > limit:
             parser.error('File too large')
         data = json.loads(args.file.read_text(encoding='utf-8'))
