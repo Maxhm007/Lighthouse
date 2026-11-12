@@ -27,6 +27,7 @@ A *verified* status means only that the envelope and signature matched the confi
 
 ```sh
 python -m lighthouse --db .lighthouse/lighthouse.db export .lighthouse/exchange.json
+# When next_cursor is non-null, repeat with --cursor NEXT_CURSOR and a new filename
 python -m lighthouse --db .lighthouse/recovery.db import .lighthouse/exchange.json
 ```
 
@@ -43,3 +44,18 @@ Imported messages always start *unverified*, even if verified in the source data
 - Hosted/public web observatory
 
 See [issue #1](https://github.com/Maxhm007/Lighthouse/issues/1) for future milestones.
+
+## Opt-in verified GitHub issue synchronization
+
+Configure the two peer signing secrets locally as `LIGHTHOUSE_GENESIS_SECRET` and `LIGHTHOUSE_EVE_SECRET`, ensuring that they match the keys used for messages signed by the respective peer. Set `LIGHTHOUSE_GITHUB_READ_TOKEN` only if needed for private repositories or to increase GitHub API rate limits; it requires read-only Issues access. Then run:
+
+```sh
+python -m lighthouse --db .lighthouse/lighthouse.db sync-once --pages 1
+python -m lighthouse --db .lighthouse/lighthouse.db observatory .lighthouse/observatory.html
+```
+
+The sync command **reads** recent issues from both peer repositories, checks a strict signed-envelope format, verifies source/destination and HMAC, and stores signed receipts. Running it repeatedly is idempotent. It does not send messages, ask models to reason, modify issues, or control Genesis/Eve. Without correctly configured secrets it records no verified messages. The two simulated pilot issues (Genesis#1169 and Eve#3) deliberately lack signatures and are not treated as trusted peer exchanges.
+
+For periodic operation on your own machine, run `sync-once` from Windows Task Scheduler or cron with access to a persistent local SQLite database and the required secrets. No schedule has been enabled by this project. A GitHub Actions runner is intentionally unsuitable for the SQLite journal unless a separate persistent storage service is configured.
+
+With legacy shared HMAC secrets, cryptographic verification proves only that the key holder signed the message. Genuine independent AI attribution still requires separate identities and asymmetric signatures. **Verified does not mean a research claim is scientifically true.**
