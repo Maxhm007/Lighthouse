@@ -153,16 +153,31 @@ class Store:
             """)]
         return {"messages": messages, "experiments": experiments, "messages_by_state": counts}
 
-    def export_bundle(self):
-        """Portable, public-data-only export. Verification statuses NEVER transfer as trust."""
+    def export_bundle(self, after_id=0, max_count=100):
+        """Paginated, bounded export; caller follows next_cursor until null."""
+        if type(after_id) is not int or after_id < 0 or type(max_count) is not int or not 1 <= max_count <= 100:
+            raise ValueError("Invalid cursor or page size")
         with self.connect() as db:
-            envelopes = [json.loads(r[0]) for r in db.execute(
-                "SELECT envelope_json FROM messages ORDER BY received_at LIMIT 5000")]
-        return {"format": "lighthouse-exchange-v1", "envelopes": envelopes}
+            rows = db.execute("SELECT rowid,envelope_json FROM messages WHERE rowid>? ORDER BY rowid LIMIT ?",
+                              (after_id, max_count + 1)).fetchall()
+        entries, cursor = [], after_id
+        has_more = len(rows) > max_count
+        for row in rows[:max_count]:
+            candidate = json.loads(row["envelope_json"])
+            trial = {"format":"lighthouse-exchange-v1","envelopes":entries+[candidate]}
+            if len(json.dumps(trial, ensure_ascii=False).encode()) > 4_900_000:
+                if not entries:
+                    raise ValueError("Single record too large")
+                has_more = True
+                break
+            entries.append(candidate)
+            cursor = row["rowid"]
+        return {"format":"lighthouse-exchange-v1","envelopes":entries,
+                "next_cursor": cursor if has_more else None}
 
     def import_bundle(self, bundle):
         """Idempotent, bounded offline import. Every imported message is unverified."""
-        if not isinstance(bundle, dict) or set(bundle) != {"format","envelopes"} or bundle["format"] != "lighthouse-exchange-v1":
+        if not isinstance(bundle, dict) or set(bundle) not in ({"format","envelopes"}, {"format","envelopes","next_cursor"}) or bundle["format"] != "lighthouse-exchange-v1":
             raise ValueError("Invalid bundle format")
         envelopes = bundle["envelopes"]
         if not isinstance(envelopes, list) or len(envelopes) > 1000:
