@@ -24,6 +24,7 @@ def main():
     verified.add_argument('--reviewer', default='manual-hmac-verifier')
     export = commands.add_parser('export', help='Export untrusted exchange bundle')
     export.add_argument('file', type=Path)
+    export.add_argument('--cursor', type=int, default=0)
     import_cmd = commands.add_parser('import', help='Import untrusted exchange bundle')
     import_cmd.add_argument('file', type=Path)
     observatory = commands.add_parser('observatory', help='Generate offline read-only HTML')
@@ -38,9 +39,9 @@ def main():
     elif args.command == 'observatory':
         value = {'output': render(store, args.file)}
     elif args.command == 'export':
-        data = store.export_bundle()
+        data = store.export_bundle(after_id=args.cursor)
         args.file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
-        value = {'exported': len(data['envelopes']), 'output': str(args.file)}
+        value = {'exported': len(data['envelopes']), 'output': str(args.file), 'next_cursor': data['next_cursor']}
     else:
         limit = 5000000 if args.command == 'import' else 100000 if args.command == 'record-experiment' else 40000
         if args.file.stat().st_size > limit:
