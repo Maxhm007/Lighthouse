@@ -113,14 +113,30 @@ class Store:
         record_id = str(uuid4())
         digest = hashlib.sha256(raw.encode()).hexdigest()
         with self.connect() as db:
-            db.execute("""
-                INSERT INTO messages
-                (id,sender,recipient,proposal_id,kind,envelope_json,sha256,
-                 verification_state,received_at,reviewed_at,reviewer,review_evidence)
-                VALUES (?,?,?,?,?,?,?,'verified',?,?,?,?)
-            """, (record_id, receipt["sender"], proposal["recipient"], receipt["proposal_id"],
-                  proposal["kind"], raw, digest, _now(), receipt["verified_at"], reviewer,
-                  "Cryptographic signature verified; scientific claims unreviewed"))
+            existing = db.execute(
+                "SELECT id,sha256,verification_state FROM messages WHERE sender=? AND proposal_id=?",
+                (receipt["sender"], receipt["proposal_id"])
+            ).fetchone()
+            if existing:
+                if existing["sha256"] != digest:
+                    raise ValueError("Conflicting payload for existing proposal ID")
+                if existing["verification_state"] == "rejected":
+                    raise ValueError("Rejected item cannot be implicitly promoted")
+                db.execute("""
+                    UPDATE messages SET verification_state='verified', reviewed_at=?,
+                    reviewer=?, review_evidence=? WHERE id=? AND verification_state='unverified'
+                """, (receipt["verified_at"], reviewer,
+                      "Signature verified; scientific claims unreviewed", existing["id"]))
+                record_id = existing["id"]
+            else:
+                db.execute("""
+                    INSERT INTO messages
+                    (id,sender,recipient,proposal_id,kind,envelope_json,sha256,
+                     verification_state,received_at,reviewed_at,reviewer,review_evidence)
+                    VALUES (?,?,?,?,?,?,?,'verified',?,?,?,?)
+                """, (record_id, receipt["sender"], proposal["recipient"], receipt["proposal_id"],
+                      proposal["kind"], raw, digest, _now(), receipt["verified_at"], reviewer,
+                      "Signature verified; scientific claims unreviewed"))
         return {"id": record_id, "verification_state": "verified", "sha256": digest}
 
     def snapshot(self):
