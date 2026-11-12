@@ -2,8 +2,10 @@
 import argparse
 import json
 import os
+import os
 from pathlib import Path
 from .store import Store
+from .observatory import render
 from .observatory import render
 
 
@@ -27,6 +29,15 @@ def main():
     import_cmd = commands.add_parser('import', help='Import untrusted exchange bundle')
     import_cmd.add_argument('file', type=Path)
     observatory = commands.add_parser('observatory', help='Generate offline read-only HTML')
+    observatory.add_argument('file', type=Path)
+    verified = commands.add_parser('verify-envelope')
+    verified.add_argument('file', type=Path)
+    verified.add_argument('--reviewer', default='manual-hmac-verifier')
+    export = commands.add_parser('export')
+    export.add_argument('file', type=Path)
+    importer = commands.add_parser('import')
+    importer.add_argument('file', type=Path)
+    observatory = commands.add_parser('observatory')
     observatory.add_argument('file', type=Path)
     args = parser.parse_args()
     store = Store(args.db)
