@@ -1,0 +1,75 @@
+name: Lighthouse scheduled peer sync
+
+on:
+  schedule:
+    # 08:17 and 20:17 Asia/Dhaka, twice daily
+    - cron: '17 2,14 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: lighthouse-persistent-sync
+  cancel-in-progress: false
+
+jobs:
+  synchronize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout Lighthouse source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run regression tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Verify secret provisioning
+        env:
+          LIGHTHOUSE_GENESIS_SECRET: ${{ secrets.LIGHTHOUSE_GENESIS_SECRET }}
+          LIGHTHOUSE_EVE_SECRET: ${{ secrets.LIGHTHOUSE_EVE_SECRET }}
+        shell: bash
+        run: |
+          if [[ ${#LIGHTHOUSE_GENESIS_SECRET} -lt 32 || ${#LIGHTHOUSE_EVE_SECRET} -lt 32 ]]; then
+            echo "::error::Lighthouse sync blocked: set LIGHTHOUSE_GENESIS_SECRET and LIGHTHOUSE_EVE_SECRET as repository Actions secrets (32+ characters each)."
+            echo "## Lighthouse sync blocked" >> "$GITHUB_STEP_SUMMARY"
+            echo "Missing peer verification credentials; no records synchronized." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Checkout persistent state branch
+        shell: bash
+        run: |
+          git fetch --no-tags origin refs/heads/lighthouse-sync-state:refs/remotes/origin/lighthouse-sync-state
+          git worktree add --detach "$RUNNER_TEMP/lighthouse-state" origin/lighthouse-sync-state
+          test -f "$RUNNER_TEMP/lighthouse-state/.lighthouse-sync/receipts.json"
+
+      - name: Authenticate, synchronize, and persist receipts
+        env:
+          LIGHTHOUSE_GENESIS_SECRET: ${{ secrets.LIGHTHOUSE_GENESIS_SECRET }}
+          LIGHTHOUSE_EVE_SECRET: ${{ secrets.LIGHTHOUSE_EVE_SECRET }}
+          LIGHTHOUSE_GITHUB_READ_TOKEN: ${{ secrets.LIGHTHOUSE_GITHUB_READ_TOKEN }}
+          STATE_DIR: ${{ runner.temp }}/lighthouse-state
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m lighthouse.archive --archive "$STATE_DIR/.lighthouse-sync/receipts.json" --pages 10 | tee "$RUNNER_TEMP/lighthouse-result.json"
+          echo "## Lighthouse verified peer synchronization" >> "$GITHUB_STEP_SUMMARY"
+          python -c 'import json,sys; x=json.load(open(sys.argv[1])); print("New receipts: {} | Total archive: {} | Scanned: {} | Rejected: {}".format(x["archive_added"],x["archive_total"],x["scanned"],x["rejected"]))' "$RUNNER_TEMP/lighthouse-result.json" >> "$GITHUB_STEP_SUMMARY"
+          git -C "$STATE_DIR" config user.name "github-actions[bot]"
+          git -C "$STATE_DIR" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$STATE_DIR" add .lighthouse-sync/receipts.json
+          if git -C "$STATE_DIR" diff --cached --quiet; then
+            echo "No new verified receipts; persistent branch unchanged." >> "$GITHUB_STEP_SUMMARY"
+          else
+            git -C "$STATE_DIR" commit -m "data: archive newly verified Genesis-Eve receipts"
+            git -C "$STATE_DIR" push origin HEAD:refs/heads/lighthouse-sync-state
+          fi
