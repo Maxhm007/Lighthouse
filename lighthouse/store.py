@@ -9,6 +9,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID, uuid4
+from .verification import verify_envelope
 
 
 def _now():
@@ -98,3 +99,96 @@ class Store:
             messages = [dict(r) for r in db.execute('SELECT verification_state,COUNT(*) AS count FROM messages GROUP BY verification_state')]
             experiments = db.execute('SELECT COUNT(*) FROM experiments').fetchone()[0]
         return {'messages': messages, 'experiments': experiments}
+
+    def record_verified_envelope(self, envelope, sender_secrets, reviewer):
+        """Verify full payload before insertion, then persist the verified receipt.
+
+        This marks *signature verification*, not independent factual validation.
+        """
+        receipt = verify_envelope(envelope, sender_secrets)
+        if not isinstance(reviewer, str) or not reviewer.strip() or len(reviewer) > 160:
+            raise ValueError("Verifier identity required")
+        proposal = envelope["proposal"]
+        raw = json.dumps(envelope, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        record_id = str(uuid4())
+        digest = hashlib.sha256(raw.encode()).hexdigest()
+        with self.connect() as db:
+            existing = db.execute(
+                "SELECT id,sha256,verification_state FROM messages WHERE sender=? AND proposal_id=?",
+                (receipt["sender"], receipt["proposal_id"])
+            ).fetchone()
+            if existing:
+                if existing["sha256"] != digest:
+                    raise ValueError("Conflicting payload for existing proposal ID")
+                if existing["verification_state"] == "rejected":
+                    raise ValueError("Rejected item cannot be implicitly promoted")
+                db.execute("""
+                    UPDATE messages SET verification_state='verified', reviewed_at=?,
+                    reviewer=?, review_evidence=? WHERE id=? AND verification_state='unverified'
+                """, (receipt["verified_at"], reviewer,
+                      "Signature verified; scientific claims unreviewed", existing["id"]))
+                record_id = existing["id"]
+            else:
+                db.execute("""
+                    INSERT INTO messages
+                    (id,sender,recipient,proposal_id,kind,envelope_json,sha256,
+                     verification_state,received_at,reviewed_at,reviewer,review_evidence)
+                    VALUES (?,?,?,?,?,?,?,'verified',?,?,?,?)
+                """, (record_id, receipt["sender"], proposal["recipient"], receipt["proposal_id"],
+                      proposal["kind"], raw, digest, _now(), receipt["verified_at"], reviewer,
+                      "Signature verified; scientific claims unreviewed"))
+        return {"id": record_id, "verification_state": "verified", "sha256": digest}
+
+    def snapshot(self):
+        with self.connect() as db:
+            messages = [dict(r) for r in db.execute("""
+                SELECT sender,recipient,kind,verification_state,received_at
+                FROM messages ORDER BY received_at DESC LIMIT 500
+            """)]
+            experiments = [dict(r) for r in db.execute("""
+                SELECT title,source,created_at FROM experiments ORDER BY created_at DESC LIMIT 500
+            """)]
+            counts = [dict(r) for r in db.execute("""
+                SELECT verification_state, COUNT(*) count FROM messages GROUP BY verification_state
+            """)]
+        return {"messages": messages, "experiments": experiments, "messages_by_state": counts}
+
+    def export_bundle(self, after_id=0, max_count=100):
+        """Paginated, bounded export; caller follows next_cursor until null."""
+        if type(after_id) is not int or after_id < 0 or type(max_count) is not int or not 1 <= max_count <= 100:
+            raise ValueError("Invalid cursor or page size")
+        with self.connect() as db:
+            rows = db.execute("SELECT rowid,envelope_json FROM messages WHERE rowid>? ORDER BY rowid LIMIT ?",
+                              (after_id, max_count + 1)).fetchall()
+        entries, cursor = [], after_id
+        has_more = len(rows) > max_count
+        for row in rows[:max_count]:
+            candidate = json.loads(row["envelope_json"])
+            trial = {"format":"lighthouse-exchange-v1","envelopes":entries+[candidate]}
+            if len(json.dumps(trial, ensure_ascii=False).encode()) > 4_900_000:
+                if not entries:
+                    raise ValueError("Single record too large")
+                has_more = True
+                break
+            entries.append(candidate)
+            cursor = row["rowid"]
+        return {"format":"lighthouse-exchange-v1","envelopes":entries,
+                "next_cursor": cursor if has_more else None}
+
+    def import_bundle(self, bundle):
+        """Idempotent, bounded offline import. Every imported message is unverified."""
+        if not isinstance(bundle, dict) or set(bundle) not in ({"format","envelopes"}, {"format","envelopes","next_cursor"}) or bundle["format"] != "lighthouse-exchange-v1":
+            raise ValueError("Invalid bundle format")
+        envelopes = bundle["envelopes"]
+        if not isinstance(envelopes, list) or len(envelopes) > 1000:
+            raise ValueError("Invalid bundle size")
+        if len(json.dumps(bundle, ensure_ascii=False).encode()) > 5_000_000:
+            raise ValueError("Oversized bundle")
+        imported, duplicates = 0, 0
+        for envelope in envelopes:
+            try:
+                self.record_envelope(envelope)
+                imported += 1
+            except sqlite3.IntegrityError:
+                duplicates += 1
+        return {"imported": imported, "duplicates": duplicates}
