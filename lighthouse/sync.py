@@ -5,6 +5,7 @@ untrusted until independently HMAC-verified. No token writes, agent commands,
 scheduled background loops, or cross-repository modifications.
 """
 import json
+import sqlite3
 import os
 import re
 import urllib.request
@@ -105,7 +106,7 @@ class PeerSync:
                             result["already_recorded"] += 1
                         else:
                             result["verified_new"] += 1
-                    except (ValueError, TypeError, KeyError, json.JSONDecodeError, Exception) as exc:
+                    except (ValueError, TypeError, KeyError, sqlite3.IntegrityError):
                         # Bad peer content cannot stop the entire synchronization sweep.
                         # Do not print content, tokens or signing keys.
                         result["rejected"] += 1
