@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from .store import Store
 from .observatory import render
+from .sync import PeerSync
 
 
 def main():
@@ -29,6 +30,8 @@ def main():
     import_cmd.add_argument('file', type=Path)
     observatory = commands.add_parser('observatory', help='Generate offline read-only HTML')
     observatory.add_argument('file', type=Path)
+    sync = commands.add_parser('sync-once', help='Read-only signed peer issue poll; never runs in background')
+    sync.add_argument('--pages', type=int, default=1)
     args = parser.parse_args()
     store = Store(args.db)
     store.init()
@@ -36,6 +39,10 @@ def main():
         value = {'database': str(Path(args.db)), 'initialized': True}
     elif args.command == 'status':
         value = store.status()
+    elif args.command == 'sync-once':
+        keys = {'genesis': os.getenv('LIGHTHOUSE_GENESIS_SECRET', ''),
+                'eve': os.getenv('LIGHTHOUSE_EVE_SECRET', '')}
+        value = PeerSync(store, keys).sync_once(pages=args.pages)
     elif args.command == 'observatory':
         value = {'output': render(store, args.file)}
     elif args.command == 'export':
