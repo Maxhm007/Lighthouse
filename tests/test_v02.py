@@ -52,8 +52,9 @@ class LighthouseV02(unittest.TestCase):
     def test_replay_alternate_uuid_rejected(self):
         envelope = message()
         self.store.record_verified_envelope(envelope, {"genesis":GENESIS_KEY}, reviewer="test")
-        with self.assertRaises(Exception):
-            self.store.record_verified_envelope(envelope, {"genesis":GENESIS_KEY}, reviewer="test")
+        again = self.store.record_verified_envelope(envelope, {"genesis":GENESIS_KEY}, reviewer="test")
+        self.assertEqual(again["verification_state"], "verified")
+        self.assertEqual(len(self.store.snapshot()["messages"]), 1)
 
     def test_export_import_idempotent_and_unverified(self):
         self.store.record_envelope(message())
